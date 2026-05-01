@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"C:\\\\Users\\\\marci\\\\Projects\\\\retro-project\\\\client\\\\src\\\\components\\\\retro\" -type f -name \"*.tsx\" -o -name \"*.ts\" 2>/dev/null | head -20)",
+      "Bash(xargs grep:*)",
+      "Bash(go build:*)"
+    ]
+  }
+}

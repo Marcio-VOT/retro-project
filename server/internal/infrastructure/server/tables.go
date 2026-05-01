@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"time"
@@ -13,15 +14,91 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	"log"
 	"retro-project/server/internal/domain/entities"
-
-	socketio "github.com/googollee/go-socket.io"
+	"retro-project/server/internal/infrastructure/sse"
 )
 
 type TableHandler struct {
-	DB     *gorm.DB
-	Socket *socketio.Server
+	DB  *gorm.DB
+	SSE *sse.Handler
+}
+
+// broadcastCards fetches the current card state for a table and broadcasts it to
+// all SSE clients in the room. IsVotedByMe is always false in broadcasts because
+// the server cannot know which client is the viewer.
+func (h *TableHandler) broadcastCards(retroID string, eventType string) {
+	if h.SSE == nil {
+		return
+	}
+	retroUUID, err := uuid.Parse(retroID)
+	if err != nil {
+		return
+	}
+	var categories []entities.RetroCategory
+	if err := h.DB.Preload("Cards").Where("retro_id = ?", retroUUID).Find(&categories).Error; err != nil {
+		log.Printf("SSE broadcast: failed to fetch cards for table %s: %v", retroID, err)
+		return
+	}
+	cards := make([]CardResponse, 0)
+	for _, category := range categories {
+		for _, card := range category.Cards {
+			var authorName string
+			if card.IsAnonymous {
+				authorName = "Anonymous"
+			} else if card.AuthorType == "user" {
+				var user entities.User
+				if h.DB.Where("id = ?", card.AuthorID).First(&user).Error == nil {
+					authorName = user.Name
+				} else {
+					authorName = "Unknown User"
+				}
+			} else if card.AuthorType == "guest" {
+				var guest entities.Guest
+				if h.DB.Where("id = ?", card.AuthorID).First(&guest).Error == nil {
+					authorName = guest.Name
+				} else {
+					authorName = "Unknown Guest"
+				}
+			}
+			cards = append(cards, CardResponse{
+				ID:          card.ID.String(),
+				Content:     card.Content,
+				AuthorType:  card.AuthorType,
+				AuthorName:  authorName,
+				CategoryID:  card.CategoryID.String(),
+				Votes:       card.Votes,
+				IsAnonymous: card.IsAnonymous,
+				CreatedAt:   card.CreatedAt,
+				IsVotedByMe: false,
+			})
+		}
+	}
+	h.SSE.BroadcastCards(retroID, eventType, cards)
+}
+
+// broadcastTopics fetches the current category state and broadcasts it to all
+// SSE clients in the room.
+func (h *TableHandler) broadcastTopics(retroID string) {
+	if h.SSE == nil {
+		return
+	}
+	retroUUID, err := uuid.Parse(retroID)
+	if err != nil {
+		return
+	}
+	var categories []entities.RetroCategory
+	if err := h.DB.Where("retro_id = ?", retroUUID).Order("\"order\" ASC").Find(&categories).Error; err != nil {
+		log.Printf("SSE broadcast: failed to fetch categories for table %s: %v", retroID, err)
+		return
+	}
+	categoriesMap := make(map[string]map[string]string)
+	for _, cat := range categories {
+		categoriesMap[cat.ID.String()] = map[string]string{
+			"title": cat.Name,
+			"color": cat.Color,
+		}
+	}
+	h.SSE.BroadcastCards(retroID, "topics:updated", categoriesMap)
 }
 
 type CreateTableRequest struct {
@@ -36,6 +113,7 @@ type TableResponse struct {
 	CreatedAt        time.Time                    `json:"createdAt"`
 	ParticipantCount int                          `json:"participantCount"`
 	Status           string                       `json:"status"`
+	CardsBlurred     bool                         `json:"cardsBlurred"`
 	Categories       map[string]map[string]string `json:"categories"`
 }
 
@@ -191,6 +269,7 @@ func (h *TableHandler) GetUserTables(c *gin.Context) {
 			CreatedAt:        retro.CreatedAt,
 			ParticipantCount: int(participantCount),
 			Status:           retro.Status,
+			CardsBlurred:     retro.CardsBlurred,
 			Categories:       categoriesMap,
 		})
 	}
@@ -265,6 +344,7 @@ func (h *TableHandler) CreateTable(c *gin.Context) {
 		CreatedAt:        retro.CreatedAt,
 		ParticipantCount: 1, // Owner is the first participant
 		Status:           retro.Status,
+		CardsBlurred:     retro.CardsBlurred,
 		Categories: map[string]map[string]string{
 			defaultCategories[0].ID.String(): {"title": "went well", "color": "bg-green-500 text-white"},
 			defaultCategories[1].ID.String(): {"title": "to improve", "color": "bg-red-500 text-white"},
@@ -417,6 +497,7 @@ func (h *TableHandler) GetTableAccess(c *gin.Context) {
 		CreatedAt:        retro.CreatedAt,
 		ParticipantCount: int(participantCount),
 		Status:           retro.Status,
+		CardsBlurred:     retro.CardsBlurred,
 		Categories:       categoriesMap,
 	}
 
@@ -488,6 +569,7 @@ func (h *TableHandler) GetTable(c *gin.Context) {
 		"name":         retro.Name,
 		"description":  retro.Description,
 		"status":       retro.Status,
+		"cardsBlurred": retro.CardsBlurred,
 		"participants": participantNames,
 		"owner":        retro.OwnerID.String(),
 		"categories":   categoriesMap,
@@ -546,15 +628,58 @@ func (h *TableHandler) ArchiveTable(c *gin.Context) {
 		return
 	}
 
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "table-archived", map[string]interface{}{
-			"tableId": retroID.String(),
-			"status":  req.Status,
-		})
+	if h.SSE != nil {
+		h.SSE.BroadcastCards(retroID.String(), "table:archived", gin.H{"tableId": retroID.String(), "status": req.Status})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// BlurCards toggles the cardsBlurred flag on the table itself.
+// Only the table owner may call this endpoint.
+// After toggling, two SSE broadcasts are sent:
+//   - table:updated  { cardsBlurred: bool }  — updates the board state on all clients
+//   - cards:updated  []CardResponse          — keeps the card list in sync
+func (h *TableHandler) BlurCards(c *gin.Context) {
+	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	tableID := c.Param("tableId")
+	retroID, err := uuid.Parse(tableID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid table ID"})
+		return
+	}
+
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	// Verify ownership
+	var retro entities.Retro
+	if err := h.DB.Where("id = ? AND owner_id = ?", retroID, userUUID).First(&retro).Error; err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Table not found or you don't have permission"})
+		return
+	}
+
+	newBlurred := !retro.CardsBlurred
+
+	if err := h.DB.Model(&retro).Update("cards_blurred", newBlurred).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update blur state"})
+		return
+	}
+
+	// Broadcast 1: table state update so every client knows the new blur flag
+	h.SSE.BroadcastCards(retroID.String(), "table:updated", gin.H{"cardsBlurred": newBlurred})
+	// Broadcast 2: current card list (unchanged, but keeps clients in sync)
+	h.broadcastCards(retroID.String(), "cards:updated")
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "cardsBlurred": newBlurred})
 }
 
 // DeleteTable handles deleting a table
@@ -646,13 +771,6 @@ func (h *TableHandler) DeleteTable(c *gin.Context) {
 	if err := tx.Commit().Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete delete operation"})
 		return
-	}
-
-	// Emit websocket event for real-time updates (if any clients are still connected)
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "table-deleted", map[string]interface{}{
-			"tableId": retroID.String(),
-		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Table deleted successfully"})
@@ -774,14 +892,7 @@ func (h *TableHandler) CreateCard(c *gin.Context) {
 		IsVotedByMe: false,
 	}
 
-	// Emit websocket event for real-time updates (for other clients)
-	if h.Socket != nil {
-		log.Printf("Emitting card-created event to room %s for card %s", category.RetroID.String(), card.ID.String())
-		h.Socket.BroadcastToRoom("/", category.RetroID.String(), "card-created", map[string]interface{}{
-			"card":    response,
-			"tableId": category.RetroID.String(),
-		})
-	}
+	h.broadcastCards(category.RetroID.String(), "cards:updated")
 
 	// Return the new card in the API response for immediate local update
 	c.JSON(http.StatusCreated, response)
@@ -875,14 +986,7 @@ func (h *TableHandler) VoteCard(c *gin.Context) {
 			return
 		}
 
-		// Emit websocket event for real-time updates
-		if h.Socket != nil {
-			h.Socket.BroadcastToRoom("/", category.RetroID.String(), "card-voted", map[string]interface{}{
-				"cardId":  cardID,
-				"action":  "vote",
-				"tableId": category.RetroID.String(),
-			})
-		}
+		h.broadcastCards(category.RetroID.String(), "votes:updated")
 	} else if req.Action == "unvote" {
 		if !voteExists {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "No vote found to remove"})
@@ -901,14 +1005,7 @@ func (h *TableHandler) VoteCard(c *gin.Context) {
 			return
 		}
 
-		// Emit websocket event for real-time updates
-		if h.Socket != nil {
-			h.Socket.BroadcastToRoom("/", category.RetroID.String(), "card-voted", map[string]interface{}{
-				"cardId":  cardID,
-				"action":  "unvote",
-				"tableId": category.RetroID.String(),
-			})
-		}
+		h.broadcastCards(category.RetroID.String(), "votes:updated")
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
@@ -988,6 +1085,13 @@ func (h *TableHandler) MergeCards(c *gin.Context) {
 		return
 	}
 
+	// Delete votes for the dragged card first (FK constraint)
+	if err := tx.Where("card_id = ?", draggedCard.ID).Delete(&entities.RetroCardVote{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete card votes"})
+		return
+	}
+
 	// Delete the dragged card
 	if err := tx.Delete(&draggedCard).Error; err != nil {
 		tx.Rollback()
@@ -1047,15 +1151,7 @@ func (h *TableHandler) MergeCards(c *gin.Context) {
 		IsVotedByMe: false, // Will be calculated by frontend
 	}
 
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", category.RetroID.String(), "cards-merged", map[string]interface{}{
-			"tableId":       category.RetroID.String(),
-			"draggedCardId": draggedCardID.String(),
-			"targetCardId":  targetCardID.String(),
-			"mergedCard":    mergedCardResponse,
-		})
-	}
+	h.broadcastCards(category.RetroID.String(), "cards:updated")
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":    true,
@@ -1145,14 +1241,6 @@ func (h *TableHandler) CreateInvite(c *gin.Context) {
 		Signature: signatureHex,
 	}
 
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "table-shared", map[string]interface{}{
-			"tableId": retroID.String(),
-			"email":   req.Email,
-		})
-	}
-
 	c.JSON(http.StatusCreated, gin.H{
 		"success":      true,
 		"signedInvite": response,
@@ -1226,14 +1314,6 @@ func (h *TableHandler) CreateSignedInvite(c *gin.Context) {
 		ExpiresAt: expiresAt,
 		CreatedBy: userUUID.String(),
 		Signature: signatureHex,
-	}
-
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "table-shared", map[string]interface{}{
-			"tableId": retroID.String(),
-			"type":    "signed-invite",
-		})
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -1359,17 +1439,6 @@ func (h *TableHandler) JoinAsGuest(c *gin.Context) {
 			Name:      guest.Name,
 			TempToken: guest.TempToken,
 		},
-	}
-
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "guest-joined", map[string]interface{}{
-			"tableId": retroID.String(),
-			"guest": gin.H{
-				"id":   guest.ID.String(),
-				"name": guest.Name,
-			},
-		})
 	}
 
 	c.JSON(http.StatusCreated, response)
@@ -1624,13 +1693,7 @@ func (h *TableHandler) CreateTopic(c *gin.Context) {
 		Order: category.Order,
 	}
 
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "topic-added", map[string]interface{}{
-			"topic":   response,
-			"tableId": retroID.String(),
-		})
-	}
+	h.broadcastTopics(retroID.String())
 
 	c.JSON(http.StatusCreated, response)
 }
@@ -1707,13 +1770,7 @@ func (h *TableHandler) UpdateTopic(c *gin.Context) {
 		Order: category.Order,
 	}
 
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "topic-updated", map[string]interface{}{
-			"topic":   response,
-			"tableId": retroID.String(),
-		})
-	}
+	h.broadcastTopics(retroID.String())
 
 	c.JSON(http.StatusOK, response)
 }
@@ -1776,6 +1833,13 @@ func (h *TableHandler) RemoveTopic(c *gin.Context) {
 	// Start a transaction
 	tx := h.DB.Begin()
 
+	// Delete votes for cards in this category first (FK constraint)
+	if err := tx.Exec("DELETE FROM retro_card_votes WHERE card_id IN (SELECT id FROM retro_cards WHERE category_id = ?)", categoryID).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete card votes"})
+		return
+	}
+
 	// Delete all cards from this category
 	if err := tx.Where("category_id = ?", categoryID).Delete(&entities.RetroCard{}).Error; err != nil {
 		tx.Rollback()
@@ -1796,13 +1860,9 @@ func (h *TableHandler) RemoveTopic(c *gin.Context) {
 		return
 	}
 
-	// Emit websocket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", retroID.String(), "topic-removed", map[string]interface{}{
-			"topicId": categoryID.String(),
-			"tableId": retroID.String(),
-		})
-	}
+	h.broadcastTopics(retroID.String())
+	// Also broadcast cards — the deleted topic's cards were removed from the DB
+	h.broadcastCards(retroID.String(), "cards:updated")
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Topic and all its cards removed successfully"})
 }
@@ -1843,19 +1903,19 @@ func (h *TableHandler) DeleteCard(c *gin.Context) {
 		return
 	}
 
+	// Delete votes for this card first (FK constraint)
+	if err := h.DB.Where("card_id = ?", card.ID).Delete(&entities.RetroCardVote{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete card votes"})
+		return
+	}
+
 	// Delete the card
 	if err := h.DB.Delete(&card).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete card"})
 		return
 	}
 
-	// Emit socket event for real-time updates
-	if h.Socket != nil {
-		h.Socket.BroadcastToRoom("/", fmt.Sprintf("table_%s", retro.ID.String()), "card-deleted", gin.H{
-			"tableId": retro.ID.String(),
-			"cardId":  cardID,
-		})
-	}
+	h.broadcastCards(retro.ID.String(), "cards:updated")
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }

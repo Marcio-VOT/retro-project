@@ -348,12 +348,24 @@ export function useRemoveTopic() {
 
 export function useDeleteTable() {
   const { loading, error, execute } = useApi<{ success: boolean; message: string }>()
-  
+
   const deleteTable = useCallback(async (tableId: string) => {
     return execute(`/api/tables/${tableId}`, {
       method: 'DELETE'
     })
   }, [execute])
-  
+
   return { deleteTable, loading, error }
+}
+
+export function useToggleBlur() {
+  const { loading, error, execute } = useApi<{ success: boolean; blurred: boolean }>()
+
+  const toggleBlur = useCallback(async (tableId: string) => {
+    return execute(`/api/tables/${tableId}/cards/blur`, {
+      method: 'PATCH'
+    })
+  }, [execute])
+
+  return { toggleBlur, loading, error }
 } 

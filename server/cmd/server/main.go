@@ -31,7 +31,7 @@ func main() {
 	}
 
 	// Initialize HTTP server (no wsHub needed)
-	srv := server.New(cfg, db, nil, logger)
+	srv, sseHub := server.New(cfg, db, nil, logger)
 
 	// Start HTTP server
 	go func() {
@@ -51,6 +51,9 @@ func main() {
 	// Create context with timeout for graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Close SSE connections before shutdown so clients unblock immediately
+	sseHub.CloseAll()
 
 	// Shutdown HTTP server
 	if err := srv.Shutdown(ctx); err != nil {

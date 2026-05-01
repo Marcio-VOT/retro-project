@@ -8,14 +8,15 @@ import (
 
 // Retro represents a retrospective session (renamed from team-based to user-based)
 type Retro struct {
-	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Name        string     `json:"name" gorm:"not null"` // Changed from Title to Name to match frontend
-	Description string     `json:"description"`
-	Status      string     `json:"status" gorm:"not null;default:'active'"` // active, archived
-	OwnerID     uuid.UUID  `json:"owner_id" gorm:"type:uuid;not null"`      // Changed from CreatedBy to OwnerID
-	TeamID      *uuid.UUID `json:"team_id" gorm:"type:uuid"`                // Optional team association
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	Name         string     `json:"name" gorm:"not null"` // Changed from Title to Name to match frontend
+	Description  string     `json:"description"`
+	Status       string     `json:"status" gorm:"not null;default:'active'"` // active, archived
+	CardsBlurred bool       `json:"cards_blurred" gorm:"default:false"`
+	OwnerID      uuid.UUID  `json:"owner_id" gorm:"type:uuid;not null"` // Changed from CreatedBy to OwnerID
+	TeamID       *uuid.UUID `json:"team_id" gorm:"type:uuid"`           // Optional team association
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 
 	// Relationships
 	Categories   []RetroCategory    `json:"categories" gorm:"foreignKey:RetroID"`

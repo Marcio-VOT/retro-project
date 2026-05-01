@@ -5,7 +5,7 @@ import (
 
 	"retro-project/server/internal/infrastructure/config"
 	"retro-project/server/internal/infrastructure/jwt"
-	"retro-project/server/internal/infrastructure/websocket"
+	"retro-project/server/internal/infrastructure/sse"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -17,7 +17,7 @@ type Server struct {
 	router *gin.Engine
 }
 
-func New(config *config.Config, db *gorm.DB, _ interface{}, logger interface{}) *http.Server {
+func New(config *config.Config, db *gorm.DB, _ interface{}, logger interface{}) (*http.Server, *sse.Hub) {
 	gin.SetMode(gin.ReleaseMode)
 
 	// Create a new router without default middleware
@@ -27,29 +27,20 @@ func New(config *config.Config, db *gorm.DB, _ interface{}, logger interface{}) 
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
 
-	// Socket.IO server - create a separate handler
-	sio := websocket.NewSocketIOServer()
-
-	// Create a custom handler for Socket.IO that bypasses Gin entirely
-	socketHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers for Socket.IO
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Handle the request with Socket.IO
-		sio.Server.ServeHTTP(w, r)
-	})
+	// Allowed origins — extend for staging/production as needed
+	allowedOrigins := map[string]bool{
+		"http://localhost:3000": true,
+	}
 
 	// Add CORS middleware
 	router.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := c.Request.Header.Get("Origin")
+		if allowedOrigins[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Credentials", "true")
+		} else {
+			c.Header("Access-Control-Allow-Origin", "*")
+		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -74,10 +65,14 @@ func New(config *config.Config, db *gorm.DB, _ interface{}, logger interface{}) 
 		JWTService: jwtService,
 	}
 
+	// SSE hub + handler
+	sseHub := sse.NewHub()
+	sseHandler := sse.NewHandler(sseHub)
+
 	// Table handler
 	tableHandler := &TableHandler{
-		DB:     db,
-		Socket: sio.Server,
+		DB:  db,
+		SSE: sseHandler,
 	}
 
 	api := router.Group("/api")
@@ -110,6 +105,7 @@ func New(config *config.Config, db *gorm.DB, _ interface{}, logger interface{}) 
 			tables.POST("", tableHandler.CreateTable)
 			tables.GET("/:tableId", tableHandler.GetTable)
 			tables.POST("/:tableId/archive", tableHandler.ArchiveTable)
+			tables.PATCH("/:tableId/cards/blur", tableHandler.BlurCards)
 			tables.DELETE("/:tableId", tableHandler.DeleteTable)
 			tables.POST("/:tableId/invite", tableHandler.CreateInvite)
 			tables.POST("/:tableId/signed-invite", tableHandler.CreateSignedInvite)
@@ -139,24 +135,17 @@ func New(config *config.Config, db *gorm.DB, _ interface{}, logger interface{}) 
 		// Table cards route (flexible auth)
 		api.GET("/tables/:tableId/cards", FlexibleAuthMiddleware(jwtService), tableHandler.GetCards)
 
+		// SSE stream route (flexible auth — same as cards)
+		api.GET("/tables/:tableId/stream", FlexibleAuthMiddleware(jwtService), sseHandler.StreamHandler)
+
 		// Invite validation routes (public)
 		api.GET("/invites/validate/:token", tableHandler.ValidateSignedInvite)
 	}
 
-	// Create a custom HTTP server that handles both Gin routes and Socket.IO
 	server := &http.Server{
-		Addr: "127.0.0.1:" + config.Server.Port,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Check if this is a Socket.IO request
-			if r.URL.Path == "/socket.io" || (len(r.URL.Path) > 12 && r.URL.Path[:12] == "/socket.io/") {
-				socketHandler.ServeHTTP(w, r)
-				return
-			}
-
-			// Otherwise, handle with Gin
-			router.ServeHTTP(w, r)
-		}),
+		Addr:    "127.0.0.1:" + config.Server.Port,
+		Handler: router,
 	}
 
-	return server
+	return server, sseHub
 }

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -28,7 +28,7 @@ import {
   TrendingUp
 } from 'lucide-react'
 import { ProtectedRoute } from '@/components/protected-route'
-import { useSocket } from '@/hooks/use-socket'
+import { useSSE } from '@/hooks/useSSE'
 import { Input } from '@/components/ui/input'
 import { ColorPicker } from '@/components/ui/color-picker'
 import { ShareModal } from '@/components/share-modal'
@@ -36,13 +36,14 @@ import { TopicManagerModal } from '@/components/topic-manager-modal'
 import { DeleteTableModal } from '@/components/delete-table-modal'
 import { useAuthStore } from '@/stores/auth-store'
 import { useGuestStore } from '@/stores/guest-store'
-import { useVoteCard, useAddCard, useArchiveTable, useShareTable, useJoinAsGuest, useGetTableWithAccess, useGetCards, useCreateTopic, useRemoveTopic, useMergeCards, useDeleteCard, useDeleteTable } from '@/hooks/use-api'
+import { useVoteCard, useAddCard, useArchiveTable, useShareTable, useJoinAsGuest, useGetTableWithAccess, useGetCards, useCreateTopic, useRemoveTopic, useMergeCards, useDeleteCard, useDeleteTable, useToggleBlur } from '@/hooks/use-api'
 import { RetroTable } from '@/types'
 import {
   DndContext,
   DragEndEvent,
   DragOverlay,
   DragStartEvent,
+  Modifier,
   PointerSensor,
   TouchSensor,
   KeyboardSensor,
@@ -68,6 +69,16 @@ interface RetroCard {
   isVotedByMe: boolean
 }
 
+const restrictToWindowEdges: Modifier = ({ transform, draggingNodeRect, windowRect }) => {
+  const value = { ...transform }
+  if (!draggingNodeRect || !windowRect) return value
+  if (draggingNodeRect.left + transform.x < windowRect.left) value.x = windowRect.left - draggingNodeRect.left
+  if (draggingNodeRect.right + transform.x > windowRect.width) value.x = windowRect.width - draggingNodeRect.right
+  if (draggingNodeRect.top + transform.y < windowRect.top) value.y = windowRect.top - draggingNodeRect.top
+  if (draggingNodeRect.bottom + transform.y > windowRect.height) value.y = windowRect.height - draggingNodeRect.bottom
+  return value
+}
+
 interface DraggableCardProps {
   card: RetroCard
   table: RetroTable
@@ -75,10 +86,11 @@ interface DraggableCardProps {
   onDelete: (cardId: string) => void
   blurred: boolean
   canDrag: boolean
+  canDelete: boolean
   getColorFromClass: (colorClass: string) => string
 }
 
-function DraggableCard({ card, table, onVote, onDelete, blurred, canDrag, getColorFromClass }: DraggableCardProps) {
+function DraggableCard({ card, table, onVote, onDelete, blurred, canDrag, canDelete, getColorFromClass }: DraggableCardProps) {
   const {
     attributes,
     listeners,
@@ -163,6 +175,21 @@ function DraggableCard({ card, table, onVote, onDelete, blurred, canDrag, getCol
               <ThumbsUp className="h-4 w-4" />
             </Button>
             <span className="text-sm font-medium min-w-[20px]">{card.votes}</span>
+            {canDelete && (
+              <Button
+                variant="ghost"
+                size="sm"
+                title="Delete card"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onDelete(card.id)
+                }}
+                className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
           </div>
         </div>
       </CardHeader>
@@ -186,12 +213,119 @@ function DraggableCard({ card, table, onVote, onDelete, blurred, canDrag, getCol
   )
 }
 
+interface DraggableRowCardProps {
+  card: RetroCard
+  table: RetroTable
+  onVote: (cardId: string) => void
+  onDelete: (cardId: string) => void
+  blurred: boolean
+  canDrag: boolean
+  canDelete: boolean
+  votingCardId: string | null
+  getColorFromClass: (colorClass: string) => string
+}
+
+function DraggableRowCard({ card, table, onVote, onDelete, blurred, canDrag, canDelete, votingCardId, getColorFromClass }: DraggableRowCardProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef: setDragNodeRef,
+    transform,
+    isDragging,
+  } = useDraggable({ id: card.id, disabled: !canDrag })
+
+  const {
+    setNodeRef: setDropNodeRef,
+    isOver,
+  } = useDroppable({ id: `drop-${card.id}` })
+
+  const setNodeRef = (node: HTMLElement | null) => {
+    setDragNodeRef(node)
+    setDropNodeRef(node)
+  }
+
+  const style = {
+    transform: isDragging ? CSS.Transform.toString(transform) : undefined,
+    opacity: isDragging ? 0.5 : 1,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`flex items-start gap-3 p-4 bg-card border rounded-lg hover:shadow-md ${canDrag ? 'cursor-move' : 'cursor-default'} ${isOver ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-950/20' : ''} ${isDragging ? '' : 'transition-all duration-200'}`}
+      style={{
+        ...style,
+        touchAction: canDrag ? 'none' : 'auto',
+        userSelect: isDragging ? 'none' : 'auto',
+        WebkitUserSelect: isDragging ? 'none' : 'auto',
+      }}
+      data-draggable={canDrag}
+      data-dragging={isDragging}
+      {...(canDrag ? { ...attributes, ...listeners } : {})}
+    >
+      <div className="flex-shrink-0 flex items-center gap-1">
+        {canDrag && (
+          <div
+            className="p-1 rounded hover:bg-accent transition-colors cursor-move"
+            title="Drag to merge"
+            style={{ touchAction: 'none' }}
+          >
+            <GripVertical className="h-4 w-4 text-muted-foreground" />
+          </div>
+        )}
+        <div
+          className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium"
+          style={{
+            backgroundColor: getColorFromClass(table.categories?.[card.categoryId]?.color || '#6B7280'),
+          }}
+        >
+          {table.categories?.[card.categoryId]?.title?.charAt(0) || '?'}
+        </div>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <p className={`text-sm break-words ${blurred ? 'blur-sm select-none' : ''}`}>
+            {card.content}
+          </p>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {table.status === 'active' && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onVote(card.id) }}
+                disabled={votingCardId === card.id}
+                className="p-1 hover:bg-accent rounded text-xs flex items-center gap-1"
+                title="Vote"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <ThumbsUp className="h-3 w-3" />
+                {card.votes}
+              </button>
+            )}
+            {canDelete && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(card.id) }}
+                className="p-1 hover:bg-destructive/10 text-destructive rounded text-xs"
+                title="Delete card"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>by {card.isAnonymous ? 'Anonymous' : card.authorName}</span>
+          <span>{new Date(card.createdAt).toLocaleDateString()}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function TableViewContent(): JSX.Element {
   const params = useParams()
   const router = useRouter()
   const searchParams = useSearchParams()
   const tableId = params.id as string
-  const socket = useSocket()
   const { isAuthenticated } = useAuthStore()
   const { isGuest, guestUser, joinAsGuest: joinAsGuestStore } = useGuestStore()
   const { shareTable } = useShareTable()
@@ -206,7 +340,8 @@ function TableViewContent(): JSX.Element {
   const { mergeCards } = useMergeCards()
   const { deleteCard } = useDeleteCard()
   const { deleteTable, loading: isDeletingTable } = useDeleteTable()
-  
+  const { toggleBlur } = useToggleBlur()
+
   const [table, setTable] = useState<RetroTable | null>(null)
   const [cards, setCards] = useState<RetroCard[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -218,17 +353,13 @@ function TableViewContent(): JSX.Element {
   const [showTopicManager, setShowTopicManager] = useState(false)
   const [newTopic, setNewTopic] = useState({ title: '', color: 'bg-gray-500 text-white' })
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
-  const [cardsBlurred, setCardsBlurred] = useState(true) // Default to blurred
   const [isArchiving, setIsArchiving] = useState(false)
   const [votingCardId, setVotingCardId] = useState<string | null>(null)
   const [showShareModal, setShowShareModal] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
-  const [displayMode, setDisplayMode] = useState<'list' | 'grid' | 'rows'>('list')
-  const [sortBy, setSortBy] = useState<'votes' | 'date' | 'author'>('votes')
+  const [displayMode, setDisplayMode] = useState<'list' | 'grid' | 'rows'>('grid')
+  const [sortBy, setSortBy] = useState<'votes' | 'date' | 'author'>('date')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
-
-  // Ref to store current table state for socket events
-  const tableRef = useRef<RetroTable | null>(null)
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -243,13 +374,6 @@ function TableViewContent(): JSX.Element {
     }),
     useSensor(KeyboardSensor)
   )
-
-  // Auto-show cards when table is archived
-  useEffect(() => {
-    if (table?.status === 'archived') {
-      setCardsBlurred(false)
-    }
-  }, [table?.status])
 
   // Set anonymous mode for guests
   useEffect(() => {
@@ -266,171 +390,24 @@ function TableViewContent(): JSX.Element {
         setNewCard(prev => ({ ...prev, categoryId: firstCategoryKey }))
       }
     }
-    // Update ref when table changes
-    tableRef.current = table
   }, [table])
 
-  // Socket.IO event listeners for real-time updates
-  const listenersSetupRef = useRef(false)
-  
-  useEffect(() => {
-    if (!socket || !tableId || listenersSetupRef.current || !socket.isConnected) {
-      console.log('Socket setup skipped:', { 
-        hasSocket: !!socket, 
-        tableId, 
-        listenersSetup: listenersSetupRef.current, 
-        isConnected: socket?.isConnected 
-      })
-      return
-    }
-
-    console.log('Setting up socket event listeners for table:', tableId)
-    listenersSetupRef.current = true
-
-    // Join the table room
-    socket.joinRoom(tableId)
-    console.log('Attempted to join room:', tableId)
-
-    // Send a debug event to test the connection
-    setTimeout(() => {
-      if (socket) {
-        console.log('Sending debug event to test connection')
-        socket.emit('debug', { tableId, message: 'Frontend connected' })
+  // SSE — real-time board updates
+  useSSE(tableId, {
+    guestToken: guestUser?.tempToken,
+    onMessage: (eventType, data) => {
+      if (eventType === 'cards:updated' || eventType === 'votes:updated') {
+        setCards(data as RetroCard[])
+      } else if (eventType === 'topics:updated') {
+        setTable(prev => prev ? { ...prev, categories: data as RetroTable['categories'] } : prev)
+      } else if (eventType === 'table:updated') {
+        const payload = data as { cardsBlurred: boolean }
+        setTable(prev => prev ? { ...prev, cardsBlurred: payload.cardsBlurred } : prev)
+      } else if (eventType === 'table:archived') {
+        setTable(prev => prev ? { ...prev, status: 'archived' } : prev)
       }
-    }, 1000)
-
-    // Listen for room join confirmation
-    const handleRoomJoined = (data: any) => {
-      console.log('Successfully joined room:', data)
-    }
-
-    // Listen for card events
-    const handleCardCreated = (data: any) => {
-      console.log('Received card-created event:', data)
-      if (data.tableId === tableId && data.card) {
-        console.log('Adding card to state:', data.card)
-        setCards(prev => [...prev, data.card])
-      } else {
-        console.log('Card event ignored - tableId mismatch or missing card data')
-      }
-    }
-
-    const handleCardUpdated = (data: any) => {
-      console.log('Received card-updated event:', data)
-      if (data.tableId === tableId && data.card) {
-        setCards(prev => prev.map(card => 
-          card.id === data.card.id ? data.card : card
-        ))
-      }
-    }
-
-    const handleCardDeleted = (data: any) => {
-      console.log('Received card-deleted event:', data)
-      if (data.tableId === tableId && data.cardId) {
-        setCards(prev => prev.filter(card => card.id !== data.cardId))
-      }
-    }
-
-    const handleCardsMerged = (data: any) => {
-      console.log('Received cards-merged event:', data)
-      if (data.tableId === tableId && data.mergedCard) {
-        setCards(prev => prev.map(card => 
-          card.id === data.mergedCard.id ? data.mergedCard : card
-        ).filter(card => card.id !== data.draggedCardId))
-      }
-    }
-
-    const handleCardVoted = (data: any) => {
-      console.log('Received card-voted event:', data)
-      if (data.tableId === tableId && data.cardId) {
-        setCards(prev => prev.map(card => 
-          card.id === data.cardId ? { ...card, votes: data.votes, isVotedByMe: data.isVotedByMe } : card
-        ))
-      }
-    }
-
-    const handleTopicAdded = (data: any) => {
-      if (data.tableId === tableId && data.topic) {
-        setTable(prev => prev ? {
-          ...prev,
-          categories: {
-            ...(prev.categories || {}),
-            [data.topic.key]: { title: data.topic.title, color: data.topic.color }
-          }
-        } : null)
-      }
-    }
-
-    const handleTopicUpdated = (data: any) => {
-      if (data.tableId === tableId && data.topic) {
-        setTable(prev => prev ? {
-          ...prev,
-          categories: {
-            ...(prev.categories || {}),
-            [data.topic.key]: { title: data.topic.title, color: data.topic.color }
-          }
-        } : null)
-      }
-    }
-
-    const handleTopicRemoved = (data: any) => {
-      if (data.tableId === tableId && data.topicKey) {
-        setTable(prev => prev ? {
-          ...prev,
-          categories: Object.fromEntries(
-            Object.entries(prev.categories || {}).filter(([key]) => key !== data.topicKey)
-          )
-        } : null)
-        
-        // Remove all cards from the deleted topic
-        setCards(prev => prev.filter(card => card.categoryId !== data.topicKey))
-      }
-    }
-
-    const handleTableArchived = (data: any) => {
-      if (data.tableId === tableId) {
-        setTable(prev => prev ? { ...prev, status: 'archived' as const } : null)
-        setCardsBlurred(false) // Show cards when archived
-      }
-    }
-
-    const handleBlurToggled = (data: any) => {
-      if (data.tableId === tableId) {
-        setCardsBlurred(data.blurred)
-      }
-    }
-
-    // Add event listeners
-    socket.on('room-joined', handleRoomJoined)
-    socket.on('card-created', handleCardCreated)
-    socket.on('card-updated', handleCardUpdated)
-    socket.on('card-deleted', handleCardDeleted)
-    socket.on('cards-merged', handleCardsMerged)
-    socket.on('card-voted', handleCardVoted)
-    socket.on('topic-added', handleTopicAdded)
-    socket.on('topic-updated', handleTopicUpdated)
-    socket.on('topic-removed', handleTopicRemoved)
-    socket.on('table-archived', handleTableArchived)
-    socket.on('blur-toggled', handleBlurToggled)
-
-    // Cleanup function
-    return () => {
-      console.log('Cleaning up socket event listeners for table:', tableId)
-      listenersSetupRef.current = false
-      socket.leaveRoom(tableId)
-      socket.off('room-joined')
-      socket.off('card-created')
-      socket.off('card-updated')
-      socket.off('card-deleted')
-      socket.off('cards-merged')
-      socket.off('card-voted')
-      socket.off('topic-added')
-      socket.off('topic-updated')
-      socket.off('topic-removed')
-      socket.off('table-archived')
-      socket.off('blur-toggled')
-    }
-  }, [socket?.isConnected, tableId]) // Only depend on connection status and tableId
+    },
+  })
 
   // Load table data with secure access
   useEffect(() => {
@@ -476,8 +453,7 @@ function TableViewContent(): JSX.Element {
         isAnonymous: showAnonymous,
       })
       if (result && result.id) {
-        // Immediately update local state for the creator
-        setCards(prev => [...prev, result])
+        // SSE broadcast (cards:updated) delivers the update to all clients including this one
         setNewCard({ content: '', categoryId: newCard.categoryId })
         toast.success('Card added!')
       }
@@ -499,16 +475,7 @@ function TableViewContent(): JSX.Element {
       const action = card.isVotedByMe ? 'unvote' : 'vote'
       const result = await voteCard(cardId, action)
       
-      if (result) {
-        // Immediately update local state for the voter
-        setCards(prev => prev.map(c => 
-          c.id === cardId ? { 
-            ...c, 
-            votes: action === 'vote' ? c.votes + 1 : c.votes - 1,
-            isVotedByMe: action === 'vote'
-          } : c
-        ))
-      }
+      // SSE broadcast (votes:updated) delivers the update to all clients including this one
     } catch (error) {
       toast.error('Failed to vote')
     } finally {
@@ -526,8 +493,7 @@ function TableViewContent(): JSX.Element {
       const result = await deleteCard(cardId)
       
       if (result) {
-        // Immediately update local state for the deleter
-        setCards(prev => prev.filter(card => card.id !== cardId))
+        // SSE broadcast (cards:updated) delivers the update to all clients including this one
         toast.success('Card deleted!')
       }
     } catch (error) {
@@ -545,15 +511,7 @@ function TableViewContent(): JSX.Element {
       })
       
       if (result && result.id) {
-        // Immediately update local state for the creator
-        setTable(prev => prev ? {
-          ...prev,
-          categories: {
-            ...(prev.categories || {}),
-            [result.id]: { title: result.title, color: result.color }
-          }
-        } : null)
-        
+        // SSE broadcast (topics:updated) delivers the update to all clients including this one
         setNewTopic({ title: '', color: 'bg-gray-500 text-white' })
         setShowTopicManager(false)
         toast.success('Topic added!')
@@ -570,17 +528,7 @@ function TableViewContent(): JSX.Element {
       const result = await removeTopic(tableId, topicKey)
       
       if (result) {
-        // Immediately update local state for the creator
-        setTable(prev => prev ? {
-          ...prev,
-          categories: Object.fromEntries(
-            Object.entries(prev.categories || {}).filter(([key]) => key !== topicKey)
-          )
-        } : null)
-        
-        // Remove all cards from the deleted topic
-        setCards(prev => prev.filter(card => card.categoryId !== topicKey))
-        
+        // SSE broadcasts topics:updated + cards:updated to all clients including this one
         toast.success('Topic removed!')
       }
     } catch (error) {
@@ -633,11 +581,7 @@ function TableViewContent(): JSX.Element {
       const result = await mergeCards(draggedCard.id, targetCard.id)
       
       if (result) {
-        // Update local state with the merged card
-        setCards(prev => prev.map(card => 
-          card.id === targetCard.id ? result.mergedCard : card
-        ).filter(card => card.id !== draggedCard.id))
-        
+        // SSE broadcast (cards:updated) delivers the update to all clients including this one
         toast.success('Cards merged successfully')
       }
     } catch (error) {
@@ -664,11 +608,6 @@ function TableViewContent(): JSX.Element {
         
         // Show success feedback
         toast.success('Table archived successfully')
-        
-        // Emit socket event for real-time updates
-        if (socket) {
-          socket.emit('archive-table', { tableId })
-        }
       }
     } catch (error) {
       toast.error('Failed to archive table')
@@ -691,11 +630,6 @@ function TableViewContent(): JSX.Element {
       if (result) {
         toast.success('Invitation sent successfully')
         setShowShareModal(false)
-        
-        // Emit socket event for real-time updates
-        if (socket) {
-          socket.emit('share-table', { tableId, email, message })
-        }
       }
     } catch (error) {
       toast.error('Failed to send invitation')
@@ -859,14 +793,14 @@ function TableViewContent(): JSX.Element {
             </Badge>
             {isOwner && table.status === 'active' && (
               <>
-                <Button 
-                  variant="outline" 
+                <Button
+                  variant="outline"
                   size="sm"
-                  onClick={() => setCardsBlurred(!cardsBlurred)}
+                  onClick={() => toggleBlur(tableId)}
                   className="flex items-center gap-2"
                 >
-                  {cardsBlurred ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                  {cardsBlurred ? 'Show Cards' : 'Hide Cards'}
+                  {table.cardsBlurred ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                  {table.cardsBlurred ? 'Show Cards' : 'Hide Cards'}
                 </Button>
                 <Button 
                   variant="outline" 
@@ -1082,15 +1016,6 @@ function TableViewContent(): JSX.Element {
           <span className="text-sm font-medium text-muted-foreground">Display:</span>
           <div className="flex items-center gap-1">
             <Button
-              variant={displayMode === 'list' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setDisplayMode('list')}
-              className="h-8 px-3"
-              title="List view"
-            >
-              <List className="h-4 w-4" />
-            </Button>
-            <Button
               variant={displayMode === 'grid' ? 'default' : 'outline'}
               size="sm"
               onClick={() => setDisplayMode('grid')}
@@ -1111,6 +1036,15 @@ function TableViewContent(): JSX.Element {
             >
               <Rows className="h-4 w-4" />
             </Button>
+            <Button
+              variant={displayMode === 'list' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setDisplayMode('list')}
+              className="h-8 px-3"
+              title="List view"
+            >
+              <List className="h-4 w-4" />
+            </Button>
           </div>
           {displayMode === 'grid' && isMobile && (
             <span className="text-xs text-muted-foreground">
@@ -1123,16 +1057,6 @@ function TableViewContent(): JSX.Element {
           <span className="text-sm font-medium text-muted-foreground">Sort by:</span>
           <div className="flex items-center gap-1">
             <Button
-              variant={sortBy === 'votes' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setSortBy('votes')}
-              className="h-8 px-3"
-              title="Sort by votes"
-            >
-              <TrendingUp className="h-4 w-4 mr-1" />
-              Votes
-            </Button>
-            <Button
               variant={sortBy === 'date' ? 'default' : 'outline'}
               size="sm"
               onClick={() => setSortBy('date')}
@@ -1141,6 +1065,16 @@ function TableViewContent(): JSX.Element {
             >
               <Calendar className="h-4 w-4 mr-1" />
               Date
+            </Button>
+            <Button
+              variant={sortBy === 'votes' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setSortBy('votes')}
+              className="h-8 px-3"
+              title="Sort by votes"
+            >
+              <TrendingUp className="h-4 w-4 mr-1" />
+              Votes
             </Button>
             <Button
               variant={sortBy === 'author' ? 'default' : 'outline'}
@@ -1191,86 +1125,56 @@ function TableViewContent(): JSX.Element {
       >
         {effectiveDisplayMode === 'grid' ? (
           // Grid view: Cards organized by topic columns
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {table.categories && Object.entries(table.categories).map(([categoryKey, category]) => {
-              const categoryCards = filteredCards.filter(card => card.categoryId === categoryKey)
-              return (
-                <div key={categoryKey} className="space-y-4">
-                  <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg">
-                    <div 
-                      className="w-4 h-4 rounded-full"
-                      style={{ backgroundColor: getColorFromClass(category.color) }}
-                    />
-                    <h3 className="font-semibold">{category.title}</h3>
-                    <Badge variant="secondary">{categoryCards.length}</Badge>
-                  </div>
-                  <div className="space-y-3">
-                    {categoryCards.map((card) => (
-                      <DraggableCard
-                        key={card.id}
-                        card={card}
-                        table={table}
-                        onVote={handleVote}
-                        onDelete={handleDeleteCard}
-                        blurred={cardsBlurred}
-                        canDrag={table.status === 'active' && isOwner}
-                        getColorFromClass={getColorFromClass}
+          filteredCards.length === 0 ? null : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {table.categories && Object.entries(table.categories).map(([categoryKey, category]) => {
+                const categoryCards = filteredCards.filter(card => card.categoryId === categoryKey)
+                return (
+                  <div key={categoryKey} className="space-y-4">
+                    <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg">
+                      <div
+                        className="w-4 h-4 rounded-full"
+                        style={{ backgroundColor: getColorFromClass(category.color) }}
                       />
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        ) : effectiveDisplayMode === 'rows' ? (
-          // Rows view: Cards in rows with topic icons
-          <div className="space-y-3">
-            {filteredCards.map((card) => (
-              <div key={card.id} className="flex items-start gap-3 p-4 bg-card border rounded-lg hover:shadow-md transition-shadow">
-                <div className="flex-shrink-0">
-                  <div 
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium"
-                    style={{ 
-                      backgroundColor: getColorFromClass(table.categories?.[card.categoryId]?.color || '#6B7280') 
-                    }}
-                  >
-                    {table.categories?.[card.categoryId]?.title?.charAt(0) || '?'}
-                  </div>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <p className={`text-sm break-words ${cardsBlurred ? 'blur-sm select-none' : ''}`}>
-                      {card.content}
-                    </p>
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      {table.status === 'active' && (
-                        <button
-                          onClick={() => handleVote(card.id)}
-                          disabled={votingCardId === card.id}
-                          className="p-1 hover:bg-accent rounded text-xs flex items-center gap-1"
-                          title="Vote"
-                        >
-                          <ThumbsUp className="h-3 w-3" />
-                          {card.votes}
-                        </button>
-                      )}
-                      {isOwner && table.status === 'active' && (
-                        <button
-                          onClick={() => handleDeleteCard(card.id)}
-                          className="p-1 hover:bg-destructive/10 text-destructive rounded text-xs"
-                          title="Delete card"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      )}
+                      <h3 className="font-semibold">{category.title}</h3>
+                      <Badge variant="secondary">{categoryCards.length}</Badge>
+                    </div>
+                    <div className="space-y-3">
+                      {categoryCards.map((card) => (
+                        <DraggableCard
+                          key={card.id}
+                          card={card}
+                          table={table}
+                          onVote={handleVote}
+                          onDelete={handleDeleteCard}
+                          blurred={!!table.cardsBlurred}
+                          canDrag={table.status === 'active' && isOwner}
+                          canDelete={isOwner && table.status === 'active'}
+                          getColorFromClass={getColorFromClass}
+                        />
+                      ))}
                     </div>
                   </div>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>by {card.isAnonymous ? 'Anonymous' : card.authorName}</span>
-                    <span>{new Date(card.createdAt).toLocaleDateString()}</span>
-                  </div>
-                </div>
-              </div>
+                )
+              })}
+            </div>
+          )
+        ) : effectiveDisplayMode === 'rows' ? (
+          // Rows view: Cards in rows with topic icons — supports drag-and-drop merge
+          <div className="space-y-3">
+            {filteredCards.map((card) => (
+              <DraggableRowCard
+                key={card.id}
+                card={card}
+                table={table}
+                onVote={handleVote}
+                onDelete={handleDeleteCard}
+                blurred={!!table.cardsBlurred}
+                canDrag={table.status === 'active' && isOwner}
+                canDelete={isOwner && table.status === 'active'}
+                votingCardId={votingCardId}
+                getColorFromClass={getColorFromClass}
+              />
             ))}
           </div>
         ) : (
@@ -1283,14 +1187,15 @@ function TableViewContent(): JSX.Element {
                 table={table}
                 onVote={handleVote}
                 onDelete={handleDeleteCard}
-                blurred={cardsBlurred}
+                blurred={!!table.cardsBlurred}
                 canDrag={table.status === 'active' && isOwner}
+                canDelete={isOwner && table.status === 'active'}
                 getColorFromClass={getColorFromClass}
               />
             ))}
           </div>
         )}
-        
+
         <DragOverlay dropAnimation={null}>
           {activeDragId ? (
             <Card className="w-full max-w-sm shadow-lg">
@@ -1320,7 +1225,7 @@ function TableViewContent(): JSX.Element {
                 </div>
               </CardHeader>
               <CardContent>
-                <p className={`text-sm mb-3 break-words overflow-wrap-anywhere hyphens-auto ${cardsBlurred ? 'blur-sm select-none' : ''}`}>
+                <p className={`text-sm mb-3 break-words overflow-wrap-anywhere hyphens-auto ${table.cardsBlurred ? 'blur-sm select-none' : ''}`}>
                   {cards.find(card => card.id === activeDragId)?.content}
                 </p>
                 <div className="flex items-center justify-between text-xs text-muted-foreground">

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/marci/go/pkg/mod/**)",
+      "Read(C:\\Users\\marci\\AppData\\Local\\Temp\\**)",
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(go mod *)",
+      "Bash(go run *)",
+      "Bash(npm install*)",
+      "Bash(npm run *)",
+      "Bash(npx vitest *)",
+      "Bash(npx *)",
+      "Bash(docker-compose *)",
+      "Bash(git *)",
+      "Bash(cd *)",
+      "Bash(npm uninstall:*)"
+    ]
+  }
+}

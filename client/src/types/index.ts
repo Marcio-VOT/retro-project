@@ -113,6 +113,7 @@ export interface RetroTable {
   createdAt: string
   participantCount: number
   status: 'active' | 'archived'
+  cardsBlurred: boolean
   participants: string[]
   owner: string
   categories: {
