@@ -54,8 +54,10 @@ export interface RetroCategory {
 export interface RetroCard {
   id: string
   content: string
-  author: string
-  category: 'start' | 'stop' | 'continue' | 'action' | string
+  authorId?: string
+  authorType: string
+  authorName: string
+  categoryId: string
   votes: number
   isAnonymous: boolean
   createdAt: string

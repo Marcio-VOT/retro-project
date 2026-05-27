@@ -3,323 +3,39 @@
 import { useState, useEffect } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Textarea } from '@/components/ui/textarea'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { 
-  Plus, 
-  MessageSquare, 
-  ThumbsUp, 
-  Users, 
-  Clock, 
-  Archive,
-  Eye,
-  EyeOff,
-  Send,
-  GripVertical,
-  Share2,
-  Trash2,
-  List,
-  Grid3X3,
-  Rows,
-  ArrowUpDown,
-  Calendar,
-  User,
-  TrendingUp
-} from 'lucide-react'
+import { MessageSquare, Users, Clock, Archive, Eye, EyeOff, Share2, Trash2, GripVertical } from 'lucide-react'
 import { ProtectedRoute } from '@/components/protected-route'
 import { useSSE } from '@/hooks/useSSE'
-import { Input } from '@/components/ui/input'
-import { ColorPicker } from '@/components/ui/color-picker'
 import { ShareModal } from '@/components/share-modal'
 import { TopicManagerModal } from '@/components/topic-manager-modal'
 import { DeleteTableModal } from '@/components/delete-table-modal'
 import { useAuthStore } from '@/stores/auth-store'
 import { useGuestStore } from '@/stores/guest-store'
 import { useVoteCard, useAddCard, useArchiveTable, useShareTable, useJoinAsGuest, useGetTableWithAccess, useGetCards, useCreateTopic, useRemoveTopic, useMergeCards, useDeleteCard, useDeleteTable, useToggleBlur } from '@/hooks/use-api'
-import { RetroTable } from '@/types'
+import { RetroCard, RetroTable } from '@/types'
 import {
   DndContext,
   DragEndEvent,
   DragOverlay,
   DragStartEvent,
-  Modifier,
   PointerSensor,
   TouchSensor,
   KeyboardSensor,
   useSensor,
   useSensors,
   closestCenter,
-  useDraggable,
-  useDroppable,
 } from '@dnd-kit/core'
-import { CSS } from '@dnd-kit/utilities'
 import { Toaster, toast } from 'sonner'
-
-interface RetroCard {
-  id: string
-  content: string
-  authorId?: string
-  authorType: string
-  authorName: string
-  categoryId: string
-  votes: number
-  isAnonymous: boolean
-  createdAt: string
-  isVotedByMe: boolean
-}
-
-const restrictToWindowEdges: Modifier = ({ transform, draggingNodeRect, windowRect }) => {
-  const value = { ...transform }
-  if (!draggingNodeRect || !windowRect) return value
-  if (draggingNodeRect.left + transform.x < windowRect.left) value.x = windowRect.left - draggingNodeRect.left
-  if (draggingNodeRect.right + transform.x > windowRect.width) value.x = windowRect.width - draggingNodeRect.right
-  if (draggingNodeRect.top + transform.y < windowRect.top) value.y = windowRect.top - draggingNodeRect.top
-  if (draggingNodeRect.bottom + transform.y > windowRect.height) value.y = windowRect.height - draggingNodeRect.bottom
-  return value
-}
-
-interface DraggableCardProps {
-  card: RetroCard
-  table: RetroTable
-  onVote: (cardId: string) => void
-  onDelete: (cardId: string) => void
-  blurred: boolean
-  canDrag: boolean
-  canDelete: boolean
-  getColorFromClass: (colorClass: string) => string
-}
-
-function DraggableCard({ card, table, onVote, onDelete, blurred, canDrag, canDelete, getColorFromClass }: DraggableCardProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef: setDragNodeRef,
-    transform,
-    isDragging,
-  } = useDraggable({ id: card.id, disabled: !canDrag })
-
-  const {
-    setNodeRef: setDropNodeRef,
-    isOver,
-  } = useDroppable({ id: `drop-${card.id}` })
-
-  // Combine refs for both drag and drop
-  const setNodeRef = (node: HTMLElement | null) => {
-    setDragNodeRef(node)
-    setDropNodeRef(node)
-  }
-
-  // Only apply transform if this card is being dragged
-  const style = {
-    transform: isDragging ? CSS.Transform.toString(transform) : undefined,
-    opacity: isDragging ? 0.5 : 1,
-  }
-
-  // Check if content contains merged separator
-  const hasMergedContent = card.content.includes('\n\n---\n\n')
-  const contentParts = hasMergedContent ? card.content.split('\n\n---\n\n') : [card.content]
-
-  // Get the category color for the badge
-  const categoryColor = table.categories?.[card.categoryId]?.color
-  const badgeColor = categoryColor ? getColorFromClass(categoryColor) : '#6B7280'
-
-  return (
-    <Card 
-      ref={setNodeRef} 
-      className={`hover:shadow-md ${canDrag ? 'cursor-move' : 'cursor-default'} ${isDragging ? 'z-50' : ''} ${isOver ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-950/20' : ''} min-h-[200px] flex flex-col ${isDragging ? '' : 'transition-all duration-200'}`}
-      {...(canDrag ? { ...attributes, ...listeners } : {})}
-      style={{
-        ...style,
-        touchAction: canDrag ? 'none' : 'auto',
-        userSelect: isDragging ? 'none' : 'auto',
-        WebkitUserSelect: isDragging ? 'none' : 'auto',
-      }}
-      data-draggable={canDrag}
-      data-dragging={isDragging}
-    >
-      <CardHeader className="pb-3 flex-shrink-0">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2">
-            <Badge 
-              variant="outline" 
-              style={{
-                backgroundColor: badgeColor,
-                color: 'white',
-                borderColor: badgeColor
-              }}
-            >
-              {table.categories?.[card.categoryId]?.title || card.categoryId}
-            </Badge>
-            {card.isAnonymous && table.status === 'active' && <EyeOff className="h-4 w-4 text-muted-foreground" />}
-            {canDrag && (
-              <div 
-                className="p-1 rounded hover:bg-accent transition-colors"
-                style={{ touchAction: 'none' }}
-              >
-                <GripVertical className="h-4 w-4 text-muted-foreground" />
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={(e) => {
-                e.stopPropagation()
-                onVote(card.id)
-              }}
-              className={`h-8 w-8 p-0 ${card.isVotedByMe ? 'text-primary' : ''}`}
-              style={{ touchAction: 'manipulation' }}
-            >
-              <ThumbsUp className="h-4 w-4" />
-            </Button>
-            <span className="text-sm font-medium min-w-[20px]">{card.votes}</span>
-            {canDelete && (
-              <Button
-                variant="ghost"
-                size="sm"
-                title="Delete card"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onDelete(card.id)
-                }}
-                className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                style={{ touchAction: 'manipulation' }}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            )}
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="flex-1 flex flex-col">
-        <div className={`space-y-3 flex-1 ${blurred ? 'blur-sm select-none' : ''}`}>
-          {contentParts.map((part, index) => (
-            <div key={index} className="flex-1">
-              <p className="text-sm leading-relaxed break-words overflow-wrap-anywhere hyphens-auto">{part}</p>
-              {index < contentParts.length - 1 && (
-                <div className="w-full h-px bg-border my-3" />
-              )}
-            </div>
-          ))}
-        </div>
-        <div className="flex items-center justify-between text-xs text-muted-foreground mt-3 flex-shrink-0">
-          <span>{card.isAnonymous ? 'Anonymous' : card.authorName}</span>
-          <span>{new Date(card.createdAt).toLocaleTimeString()}</span>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-interface DraggableRowCardProps {
-  card: RetroCard
-  table: RetroTable
-  onVote: (cardId: string) => void
-  onDelete: (cardId: string) => void
-  blurred: boolean
-  canDrag: boolean
-  canDelete: boolean
-  votingCardId: string | null
-  getColorFromClass: (colorClass: string) => string
-}
-
-function DraggableRowCard({ card, table, onVote, onDelete, blurred, canDrag, canDelete, votingCardId, getColorFromClass }: DraggableRowCardProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef: setDragNodeRef,
-    transform,
-    isDragging,
-  } = useDraggable({ id: card.id, disabled: !canDrag })
-
-  const {
-    setNodeRef: setDropNodeRef,
-    isOver,
-  } = useDroppable({ id: `drop-${card.id}` })
-
-  const setNodeRef = (node: HTMLElement | null) => {
-    setDragNodeRef(node)
-    setDropNodeRef(node)
-  }
-
-  const style = {
-    transform: isDragging ? CSS.Transform.toString(transform) : undefined,
-    opacity: isDragging ? 0.5 : 1,
-  }
-
-  return (
-    <div
-      ref={setNodeRef}
-      className={`flex items-start gap-3 p-4 bg-card border rounded-lg hover:shadow-md ${canDrag ? 'cursor-move' : 'cursor-default'} ${isOver ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-950/20' : ''} ${isDragging ? '' : 'transition-all duration-200'}`}
-      style={{
-        ...style,
-        touchAction: canDrag ? 'none' : 'auto',
-        userSelect: isDragging ? 'none' : 'auto',
-        WebkitUserSelect: isDragging ? 'none' : 'auto',
-      }}
-      data-draggable={canDrag}
-      data-dragging={isDragging}
-      {...(canDrag ? { ...attributes, ...listeners } : {})}
-    >
-      <div className="flex-shrink-0 flex items-center gap-1">
-        {canDrag && (
-          <div
-            className="p-1 rounded hover:bg-accent transition-colors cursor-move"
-            title="Drag to merge"
-            style={{ touchAction: 'none' }}
-          >
-            <GripVertical className="h-4 w-4 text-muted-foreground" />
-          </div>
-        )}
-        <div
-          className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium"
-          style={{
-            backgroundColor: getColorFromClass(table.categories?.[card.categoryId]?.color || '#6B7280'),
-          }}
-        >
-          {table.categories?.[card.categoryId]?.title?.charAt(0) || '?'}
-        </div>
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-start justify-between gap-2 mb-2">
-          <p className={`text-sm break-words ${blurred ? 'blur-sm select-none' : ''}`}>
-            {card.content}
-          </p>
-          <div className="flex items-center gap-1 flex-shrink-0">
-            {table.status === 'active' && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onVote(card.id) }}
-                disabled={votingCardId === card.id}
-                className="p-1 hover:bg-accent rounded text-xs flex items-center gap-1"
-                title="Vote"
-                style={{ touchAction: 'manipulation' }}
-              >
-                <ThumbsUp className="h-3 w-3" />
-                {card.votes}
-              </button>
-            )}
-            {canDelete && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onDelete(card.id) }}
-                className="p-1 hover:bg-destructive/10 text-destructive rounded text-xs"
-                title="Delete card"
-                style={{ touchAction: 'manipulation' }}
-              >
-                <Trash2 className="h-3 w-3" />
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>by {card.isAnonymous ? 'Anonymous' : card.authorName}</span>
-          <span>{new Date(card.createdAt).toLocaleDateString()}</span>
-        </div>
-      </div>
-    </div>
-  )
-}
+import { getColorFromClass } from '@/lib/color-utils'
+import { useIsMobile } from '@/hooks/use-is-mobile'
+import { CategoryTabs } from '@/components/retro/category-tabs'
+import { AddCardForm } from '@/components/retro/add-card-form'
+import { ViewControls } from '@/components/retro/view-controls'
+import { CardGridView } from '@/components/retro/card-grid-view'
+import { CardRowsView } from '@/components/retro/card-rows-view'
+import { CardListView } from '@/components/retro/card-list-view'
 
 function TableViewContent(): JSX.Element {
   const params = useParams()
@@ -679,26 +395,10 @@ function TableViewContent(): JSX.Element {
     ? sortedCards 
     : sortedCards.filter(card => card.categoryId === activeCategory)
 
-  // Mobile detection hook
-  const [isMobile, setIsMobile] = useState(false)
-  
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768)
-    }
-    
-    checkMobile()
-    window.addEventListener('resize', checkMobile)
-    return () => window.removeEventListener('resize', checkMobile)
-  }, [])
+  const isMobile = useIsMobile()
 
   // Determine effective display mode (auto-switch to rows on mobile for grid mode)
   const effectiveDisplayMode = displayMode === 'grid' && isMobile ? 'rows' : displayMode
-
-  // Debug modal state
-  useEffect(() => {
-    console.log('showTopicManager changed:', showTopicManager)
-  }, [showTopicManager])
 
   const isFormValid = newTopic.title.trim().length > 0
 
@@ -709,44 +409,6 @@ function TableViewContent(): JSX.Element {
     ))
 
   const isTopicFormValid = newTopic.title.trim().length > 0 && !isTopicNameDuplicate
-
-  // Helper function to get hex color from Tailwind class
-  const getColorFromClass = (colorClass: string): string => {
-    // If it's already a hex color, return it directly
-    if (colorClass.startsWith('#')) {
-      return colorClass
-    }
-    
-    const colorMap: Record<string, string> = {
-      'bg-red-500': '#EF4444',
-      'bg-orange-500': '#F97316',
-      'bg-yellow-500': '#EAB308',
-      'bg-green-500': '#22C55E',
-      'bg-teal-500': '#14B8A6',
-      'bg-blue-500': '#3B82F6',
-      'bg-indigo-500': '#6366F1',
-      'bg-purple-500': '#A855F7',
-      'bg-pink-500': '#EC4899',
-      'bg-rose-500': '#F43F5E',
-      'bg-slate-500': '#64748B',
-      'bg-gray-500': '#6B7280'
-    }
-
-    // Handle custom colors with bg-[#hex] format
-    if (colorClass.startsWith('bg-[#') && colorClass.includes(']')) {
-      const hexMatch = colorClass.match(/#[0-9A-Fa-f]{6}/)
-      return hexMatch?.[0] || '#6B7280'
-    }
-
-    // Handle predefined colors
-    for (const [className, hexColor] of Object.entries(colorMap)) {
-      if (colorClass.includes(className)) {
-        return hexColor
-      }
-    }
-
-    return '#6B7280' // fallback
-  }
 
   if (isLoading) {
     return (
@@ -860,244 +522,42 @@ function TableViewContent(): JSX.Element {
         </div>
       </div>
 
-      {/* Category Tabs */}
-      <div className="mb-6">
-        <div className="flex flex-wrap gap-2">
-          {/* All Topics Tab */}
-          <Button
-            variant={activeCategory === 'all' ? 'default' : 'outline'}
-            size="sm"
-            onClick={() => setActiveCategory('all')}
-            className="flex items-center gap-2"
-          >
-            <div className="w-3 h-3 rounded-full bg-gray-400"></div>
-            All Topics
-            <Badge variant="secondary" className="ml-1">
-              {cards.length}
-            </Badge>
-          </Button>
-          
-          {/* Individual Topic Tabs */}
-          {table.categories && Object.entries(table.categories).map(([key, category]) => (
-            <Button
-              key={key}
-              variant={activeCategory === key ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setActiveCategory(key)}
-              className="flex items-center gap-2"
-            >
-              <div 
-                className="w-3 h-3 rounded-full"
-                style={{
-                  backgroundColor: getColorFromClass(category.color)
-                }}
-              ></div>
-              {category.title}
-              <Badge variant="secondary" className="ml-1">
-                {cards.filter(card => card.categoryId === key).length}
-              </Badge>
-              {isOwner && table.status === 'active' && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    handleRemoveTopic(key)
-                  }}
-                  className="h-4 w-4 p-0 ml-1 hover:bg-destructive hover:text-destructive-foreground"
-                >
-                  ×
-                </Button>
-              )}
-            </Button>
-          ))}
-          
-          {/* Add Topic Button for Owner */}
-          {isOwner && table.status === 'active' && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                console.log('Add Topic button clicked, setting showTopicManager to true')
-                setShowTopicManager(true)
-              }}
-              className="flex items-center gap-2"
-            >
-              <Plus className="h-3 w-3" />
-              Add Topic
-            </Button>
-          )}
-        </div>
-      </div>
+      <CategoryTabs
+        categories={table.categories}
+        cards={cards}
+        activeCategory={activeCategory}
+        isOwner={isOwner}
+        tableStatus={table.status}
+        onCategoryChange={setActiveCategory}
+        onRemoveTopic={handleRemoveTopic}
+        onAddTopicClick={() => setShowTopicManager(true)}
+      />
 
 
 
-      {/* Add Card Section */}
       {table.status === 'active' && (
-        <Card className="mb-8">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Plus className="h-5 w-5" />
-              Add New Card
-            </CardTitle>
-            <CardDescription>
-              Share your thoughts for the {activeCategory === 'all' ? 'selected' : table.categories?.[activeCategory]?.title || 'selected'} category
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="flex gap-4">
-                <div className="flex-1">
-                  <Textarea
-                    placeholder="Enter your feedback..."
-                    value={newCard.content}
-                    onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setNewCard(prev => ({ ...prev, content: e.target.value }))}
-                    className="min-h-[100px]"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id="anonymous"
-                      checked={showAnonymous}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setShowAnonymous(e.target.checked)}
-                      disabled={isGuest}
-                      className="rounded"
-                    />
-                    <label htmlFor="anonymous" className={`text-sm ${isGuest ? 'text-muted-foreground' : ''}`}>
-                      Post anonymously{isGuest && ' (required for guests)'}
-                    </label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {showAnonymous ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    <span className="text-xs text-muted-foreground">
-                      {isGuest 
-                        ? 'Guest participants must post anonymously' 
-                        : showAnonymous 
-                          ? 'Will be posted anonymously' 
-                          : 'Will show your name'
-                      }
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex justify-between items-center">
-                <div className="flex gap-2">
-                  {table.categories && Object.entries(table.categories).map(([key, category]) => (
-                    <Button
-                      key={key}
-                      variant={newCard.categoryId === key ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => setNewCard(prev => ({ ...prev, categoryId: key }))}
-                      style={newCard.categoryId === key ? {
-                        backgroundColor: getColorFromClass(category.color),
-                        borderColor: getColorFromClass(category.color),
-                        color: 'white'
-                      } : {}}
-                    >
-                      {category.title}
-                    </Button>
-                  ))}
-                </div>
-                <Button onClick={handleAddCard} disabled={!newCard.content.trim()}>
-                  <Send className="h-4 w-4 mr-2" />
-                  Add Card
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <AddCardForm
+          categories={table.categories}
+          newCard={newCard}
+          isAddingCard={isAddingCard}
+          showAnonymous={showAnonymous}
+          isGuest={isGuest}
+          onContentChange={(content) => setNewCard(prev => ({ ...prev, content }))}
+          onCategoryChange={(categoryId) => setNewCard(prev => ({ ...prev, categoryId }))}
+          onAnonymousChange={setShowAnonymous}
+          onSubmit={handleAddCard}
+        />
       )}
 
-      {/* View Controls */}
-      <div className="mb-6 flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">Display:</span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant={displayMode === 'grid' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setDisplayMode('grid')}
-              className="h-8 px-3"
-              title="Grid view (columns by topic)"
-            >
-              <Grid3X3 className="h-4 w-4" />
-              {displayMode === 'grid' && isMobile && (
-                <Badge variant="secondary" className="ml-1 text-xs">→ rows</Badge>
-              )}
-            </Button>
-            <Button
-              variant={displayMode === 'rows' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setDisplayMode('rows')}
-              className="h-8 px-3"
-              title="Rows with icons"
-            >
-              <Rows className="h-4 w-4" />
-            </Button>
-            <Button
-              variant={displayMode === 'list' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setDisplayMode('list')}
-              className="h-8 px-3"
-              title="List view"
-            >
-              <List className="h-4 w-4" />
-            </Button>
-          </div>
-          {displayMode === 'grid' && isMobile && (
-            <span className="text-xs text-muted-foreground">
-              (Auto-switched to rows on mobile)
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">Sort by:</span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant={sortBy === 'date' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setSortBy('date')}
-              className="h-8 px-3"
-              title="Sort by date"
-            >
-              <Calendar className="h-4 w-4 mr-1" />
-              Date
-            </Button>
-            <Button
-              variant={sortBy === 'votes' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setSortBy('votes')}
-              className="h-8 px-3"
-              title="Sort by votes"
-            >
-              <TrendingUp className="h-4 w-4 mr-1" />
-              Votes
-            </Button>
-            <Button
-              variant={sortBy === 'author' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setSortBy('author')}
-              className="h-8 px-3"
-              title="Sort by author"
-            >
-              <User className="h-4 w-4 mr-1" />
-              Author
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
-              className="h-8 px-3"
-              title={`Sort ${sortOrder === 'asc' ? 'descending' : 'ascending'}`}
-            >
-              <ArrowUpDown className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-      </div>
+      <ViewControls
+        displayMode={displayMode}
+        sortBy={sortBy}
+        sortOrder={sortOrder}
+        isMobile={isMobile}
+        onDisplayModeChange={setDisplayMode}
+        onSortByChange={setSortBy}
+        onSortOrderChange={setSortOrder}
+      />
 
       {table.status === 'archived' && (
         <Card className="mb-8 border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20">
@@ -1124,76 +584,37 @@ function TableViewContent(): JSX.Element {
         modifiers={[]}
       >
         {effectiveDisplayMode === 'grid' ? (
-          // Grid view: Cards organized by topic columns
-          filteredCards.length === 0 ? null : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-              {table.categories && Object.entries(table.categories).map(([categoryKey, category]) => {
-                const categoryCards = filteredCards.filter(card => card.categoryId === categoryKey)
-                return (
-                  <div key={categoryKey} className="space-y-4">
-                    <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg">
-                      <div
-                        className="w-4 h-4 rounded-full"
-                        style={{ backgroundColor: getColorFromClass(category.color) }}
-                      />
-                      <h3 className="font-semibold">{category.title}</h3>
-                      <Badge variant="secondary">{categoryCards.length}</Badge>
-                    </div>
-                    <div className="space-y-3">
-                      {categoryCards.map((card) => (
-                        <DraggableCard
-                          key={card.id}
-                          card={card}
-                          table={table}
-                          onVote={handleVote}
-                          onDelete={handleDeleteCard}
-                          blurred={!!table.cardsBlurred}
-                          canDrag={table.status === 'active' && isOwner}
-                          canDelete={isOwner && table.status === 'active'}
-                          getColorFromClass={getColorFromClass}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )
+          <CardGridView
+            categories={table.categories}
+            cards={filteredCards}
+            table={table}
+            onVote={handleVote}
+            onDelete={handleDeleteCard}
+            blurred={!!table.cardsBlurred}
+            canDrag={table.status === 'active' && isOwner}
+            canDelete={isOwner && table.status === 'active'}
+          />
         ) : effectiveDisplayMode === 'rows' ? (
-          // Rows view: Cards in rows with topic icons — supports drag-and-drop merge
-          <div className="space-y-3">
-            {filteredCards.map((card) => (
-              <DraggableRowCard
-                key={card.id}
-                card={card}
-                table={table}
-                onVote={handleVote}
-                onDelete={handleDeleteCard}
-                blurred={!!table.cardsBlurred}
-                canDrag={table.status === 'active' && isOwner}
-                canDelete={isOwner && table.status === 'active'}
-                votingCardId={votingCardId}
-                getColorFromClass={getColorFromClass}
-              />
-            ))}
-          </div>
+          <CardRowsView
+            cards={filteredCards}
+            table={table}
+            onVote={handleVote}
+            onDelete={handleDeleteCard}
+            blurred={!!table.cardsBlurred}
+            canDrag={table.status === 'active' && isOwner}
+            canDelete={isOwner && table.status === 'active'}
+            votingCardId={votingCardId}
+          />
         ) : (
-          // List view: Default grid layout
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 auto-rows-fr">
-            {filteredCards.map((card) => (
-              <DraggableCard
-                key={card.id}
-                card={card}
-                table={table}
-                onVote={handleVote}
-                onDelete={handleDeleteCard}
-                blurred={!!table.cardsBlurred}
-                canDrag={table.status === 'active' && isOwner}
-                canDelete={isOwner && table.status === 'active'}
-                getColorFromClass={getColorFromClass}
-              />
-            ))}
-          </div>
+          <CardListView
+            cards={filteredCards}
+            table={table}
+            onVote={handleVote}
+            onDelete={handleDeleteCard}
+            blurred={!!table.cardsBlurred}
+            canDrag={table.status === 'active' && isOwner}
+            canDelete={isOwner && table.status === 'active'}
+          />
         )}
 
         <DragOverlay dropAnimation={null}>

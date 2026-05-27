@@ -346,7 +346,7 @@ describe('drag and drop for merge in rows mode (TASK 3)', () => {
         { ...BASE_CARD, id: 'c2', content: 'second row card' },
       ])
     })
-    const rowsBtn = screen.getByTitle('Rows with icons')
+    const rowsBtn = screen.getByTitle('Rows view')
     await act(async () => { fireEvent.click(rowsBtn) })
   }
 
